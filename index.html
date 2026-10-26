@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SmartSOS</title>
+<style>
+:root{
+  --bg:#eef0f3; --card:#ffffff; --ink:#14213d; --muted:#5b6475; --line:#cfd4dc;
+  --btn:#14213d; --btn-ink:#ffffff; --alert:#b3261e; --ok:#1f6f43; --grid:#e3e6eb;
+  box-sizing:border-box; color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#10131a; --card:#1a1f2b; --ink:#e8ecf4; --muted:#9aa4b6; --line:#2d3444;
+    --btn:#e8ecf4; --btn-ink:#10131a; --alert:#ff8a80; --ok:#7bd8a0; --grid:#252b39; color-scheme:dark;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Times New Roman",Times,serif;font-size:18px;line-height:1.5}
+header{background:var(--btn);color:var(--btn-ink);padding:14px 24px}
+header h1{margin:0;font-size:26px}
+header p{margin:0;font-size:15px;opacity:.85}
+main{max-width:1000px;margin:0 auto;padding:20px 16px 40px;display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:760px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px}
+.wide{grid-column:1/-1}
+h2{font-size:20px;margin:0 0 10px}
+label{display:block;font-weight:bold;margin:10px 0 4px}
+input{width:100%;font:inherit;padding:9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
+button{font:inherit;padding:11px 14px;border:0;border-radius:6px;background:var(--btn);color:var(--btn-ink);cursor:pointer}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button:focus-visible,input:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.row{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.status{font-size:24px;margin:0}
+.big{font-size:44px;margin:0}
+.small{color:var(--muted);font-size:15px;margin:4px 0 0}
+canvas{width:100%;height:220px;display:block}
+#alertBox{display:none;border:2px solid var(--alert)}
+#alertBox h2{color:var(--alert)}
+.count{font-size:64px;text-align:center;margin:0}
+#log{margin:0;padding-left:18px;max-height:170px;overflow-y:auto;font-size:16px}
+</style>
+</head>
+<body>
+<header>
+  <h1>SmartSOS</h1>
+  <p>Smartphone sensor-based automatic accident detection and emergency response</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Rider details</h2>
+    <label for="nm">Rider name</label>
+    <input id="nm" type="text" placeholder="Vyshnavi">
+    <label for="num">Emergency contact number</label>
+    <input id="num" type="tel" placeholder="+919876543210">
+    <p class="small">Use the country code. The number must be verified in Twilio.</p>
+    <label for="loc">Backup location, if the browser blocks GPS (optional)</label>
+    <input id="loc" type="text" placeholder="9.9816, 76.2999">
+  </section>
+
+  <section class="card">
+    <h2>Monitor</h2>
+    <p class="status" id="status">Not monitoring</p>
+    <p class="big" id="g">1.00 g</p>
+    <p class="small">Simulated accelerometer. A phone at rest reads about 1 g.</p>
+    <div class="row"><button id="startBtn">Start monitoring</button></div>
+  </section>
+
+  <section class="card wide">
+    <h2>Sensor graph (last 10 seconds)</h2>
+    <canvas id="chart" width="900" height="220"></canvas>
+    <p class="small">The dashed line is the crash threshold (3 g). A crash is a hit above it, followed by 3 seconds of stillness.</p>
+    <div class="row">
+      <button class="ghost" id="bumpBtn">Pothole bump</button>
+      <button class="ghost" id="brakeBtn">Hard brake</button>
+      <button id="crashBtn">Crash</button>
+    </div>
+  </section>
+
+  <section class="card wide" id="alertBox" role="alert">
+    <h2>Crash detected</h2>
+    <p>Sending SOS to your emergency contact in:</p>
+    <p class="count" id="count">15</p>
+    <div class="row"><button id="cancelBtn">I’m OK, cancel</button></div>
+  </section>
+
+  <section class="card wide">
+    <h2>Event log</h2>
+    <ol id="log"></ol>
+    <p class="small"><a href="/incidents.html" target="_blank">Open incident log (database)</a></p>
+  </section>
+</main>
+
+<script>
+(function(){
+  var IMPACT_G = 3.0, STILL_MS = 3000, STILL_TOL = 0.25, TICK = 50, KEEP = 200;
+  var $ = function(id){ return document.getElementById(id); };
+
+  var timer = null, monitoring = false, mode = 'riding';
+  var queue = [];            // scripted samples for bump / brake / crash
+  var data = [];             // recent g values for the chart
+  var impactAt = 0, peak = 0, countdown = null, left = 0;
+
+  // remember inputs
+  ['nm','num','loc'].forEach(function(id){
+    try { $(id).value = localStorage.getItem('sos_'+id) || ''; } catch(e){}
+    $(id).addEventListener('input', function(){ try{ localStorage.setItem('sos_'+id, $(id).value); }catch(e){} });
+  });
+
+  function log(t){
+    var li = document.createElement('li');
+    li.textContent = new Date().toLocaleTimeString() + ': ' + t;
+    $('log').insertBefore(li, $('log').firstChild);
+  }
+  function setStatus(t){ $('status').textContent = t; }
+
+  // ---- Simulated accelerometer ----
+  function rnd(a){ return (Math.random()-0.5)*a; }
+  function nextSample(){
+    if(queue.length) return queue.shift();
+    if(mode === 'still') return 1 + rnd(0.06);   // phone lying on the road
+    return 1 + rnd(0.8);                         // normal riding vibration
+  }
+  function scenario(name){
+    if(!monitoring){ setStatus('Press Start monitoring first'); return; }
+    if(name === 'bump'){
+      queue = [1.6,2.4,2.1,0.6,1.5,1.2]; log('Simulated: pothole bump');
+    } else if(name === 'brake'){
+      queue = []; for(var i=0;i<20;i++) queue.push(1.7 + rnd(0.2)); log('Simulated: hard brake');
+    } else if(name === 'crash'){
+      queue = [2.2,4.1,6.3,5.2,3.4,1.9,0.5,1.8,1.0]; mode = 'still'; log('Simulated: crash');
+    }
+  }
+
+  // ---- Detection (same logic that will run on the phone) ----
+  function detect(g){
+    var now = Date.now();
+    if(countdown) return;
+    if(!impactAt){
+      if(g > IMPACT_G){ impactAt = now; peak = g; log('Impact detected: ' + g.toFixed(2) + ' g'); }
+    } else {
+      if(g > peak) peak = g;
+      if(Math.abs(g - 1) > STILL_TOL){
+        if(now - impactAt > 10000){ impactAt = 0; log('Rider still moving: no crash'); }
+      } else if(now - impactAt > STILL_MS){
+        impactAt = 0; crash();
+      }
+    }
+  }
+
+  function tick(){
+    var g = Math.max(0, nextSample());
+    data.push(g); if(data.length > KEEP) data.shift();
+    $('g').textContent = g.toFixed(2) + ' g';
+    detect(g);
+    draw();
+  }
+
+  // ---- Chart ----
+  function draw(){
+    var c = $('chart'), x = c.getContext('2d'), W = c.width, H = c.height, MAXG = 7;
+    var cs = getComputedStyle(document.documentElement);
+    x.clearRect(0,0,W,H);
+    x.strokeStyle = cs.getPropertyValue('--grid'); x.lineWidth = 1; x.fillStyle = cs.getPropertyValue('--muted'); x.font = '14px "Times New Roman"';
+    for(var v=0; v<=MAXG; v++){
+      var y = H - (v/MAXG)*(H-10) - 5;
+      x.beginPath(); x.moveTo(30,y); x.lineTo(W,y); x.stroke(); x.fillText(v+'g', 2, y+4);
+    }
+    var ty = H - (IMPACT_G/MAXG)*(H-10) - 5;
+    x.strokeStyle = cs.getPropertyValue('--alert'); x.setLineDash([6,5]);
+    x.beginPath(); x.moveTo(30,ty); x.lineTo(W,ty); x.stroke(); x.setLineDash([]);
+    x.strokeStyle = cs.getPropertyValue('--ink'); x.lineWidth = 2; x.beginPath();
+    data.forEach(function(g,i){
+      var px = 30 + (i/(KEEP-1))*(W-30), py = H - (Math.min(g,MAXG)/MAXG)*(H-10) - 5;
+      i ? x.lineTo(px,py) : x.moveTo(px,py);
+    });
+    x.stroke();
+  }
+
+  // ---- Countdown and alert ----
+  function crash(){
+    if(countdown) return;
+    left = 15; $('count').textContent = left;
+    $('alertBox').style.display = 'block';
+    setStatus('Crash detected'); log('Crash confirmed. 15 s to cancel');
+    countdown = setInterval(function(){
+      left--; $('count').textContent = left;
+      if(left <= 0){ clearInterval(countdown); countdown = null; sendSOS(); }
+    }, 1000);
+  }
+  function cancel(){
+    clearInterval(countdown); countdown = null; mode = 'riding'; queue = [];
+    $('alertBox').style.display = 'none';
+    setStatus('Monitoring…'); log('Alert cancelled by rider');
+  }
+
+  function postAlert(lat, lng){
+    var payload = { name:$('nm').value.trim(), contact:$('num').value.trim(), lat:lat, lng:lng, peakG:+peak.toFixed(2) };
+    fetch('/api/alert', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        setStatus(d.ok ? 'SOS sent to emergency contact' : 'SOS failed');
+        log(d.ok ? 'SMS sent and incident saved in database' : 'SMS failed: ' + d.status);
+      })
+      .catch(function(){ setStatus('Server not reachable'); log('Server not reachable. Is npm start running?'); });
+  }
+  function fallbackLoc(){
+    var m = $('loc').value.split(',');
+    if(m.length === 2 && !isNaN(parseFloat(m[0])) && !isNaN(parseFloat(m[1]))) return [m[0].trim(), m[1].trim()];
+    return [null, null];
+  }
+  function sendSOS(){
+    $('alertBox').style.display = 'none';
+    setStatus('Sending SOS…'); log('Getting location…');
+    function fb(){ var f = fallbackLoc(); log(f[0] ? 'Using backup location' : 'No location available'); postAlert(f[0], f[1]); }
+    if(!navigator.geolocation){ fb(); return; }
+    navigator.geolocation.getCurrentPosition(
+      function(p){ log('GPS location found'); postAlert(p.coords.latitude.toFixed(6), p.coords.longitude.toFixed(6)); },
+      fb, { enableHighAccuracy:true, timeout:8000 });
+  }
+
+  // ---- Buttons ----
+  $('startBtn').addEventListener('click', function(){
+    if(monitoring){
+      clearInterval(timer); monitoring = false; impactAt = 0; queue = []; mode = 'riding';
+      $('startBtn').textContent = 'Start monitoring'; setStatus('Not monitoring'); log('Monitoring stopped');
+      return;
+    }
+    if(!$('num').value.trim()){ setStatus('Enter a contact number first'); return; }
+    monitoring = true; mode = 'riding'; data = [];
+    timer = setInterval(tick, TICK);
+    $('startBtn').textContent = 'Stop monitoring'; setStatus('Monitoring…'); log('Monitoring started');
+  });
+  $('bumpBtn').addEventListener('click', function(){ scenario('bump'); });
+  $('brakeBtn').addEventListener('click', function(){ scenario('brake'); });
+  $('crashBtn').addEventListener('click', function(){ scenario('crash'); });
+  $('cancelBtn').addEventListener('click', cancel);
+  draw();
+})();
+</script>
+</body>
+</html>

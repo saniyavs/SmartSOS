@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmartSOS Incident Log</title>
+<style>
+body{font-family:"Times New Roman",Times,serif;margin:0;padding:20px;color:#14213d;background:#f3f4f6}
+h1{margin:0 0 4px} p{margin:0 0 16px;color:#5b6475}
+.wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;background:#fff;min-width:640px}
+th,td{border:1px solid #d5d9e0;padding:8px;text-align:left;font-size:16px}
+th{background:#14213d;color:#fff}
+</style></head><body>
+<h1>Incident log</h1>
+<p>Every alert sent by the app is stored in the database and shown here.</p>
+<div class="wrap"><table>
+<thead><tr><th>ID</th><th>Rider</th><th>Contact</th><th>Peak g</th><th>Location</th><th>SMS</th><th>Time (UTC)</th></tr></thead>
+<tbody id="rows"><tr><td colspan="7">Loading…</td></tr></tbody>
+</table></div>
+<script>
+fetch('/api/incidents').then(function(r){return r.json()}).then(function(list){
+  var b=document.getElementById('rows');
+  if(!list.length){b.innerHTML='<tr><td colspan="7">No incidents yet.</td></tr>';return;}
+  b.innerHTML=list.map(function(i){
+    var loc=i.lat?'<a href="https://maps.google.com/?q='+i.lat+','+i.lng+'" target="_blank">'+i.lat+', '+i.lng+'</a>':'n/a';
+    return '<tr><td>'+i.id+'</td><td>'+(i.rider_name||'')+'</td><td>'+i.contact+'</td><td>'+(i.peak_g||'')+'</td><td>'+loc+'</td><td>'+i.sms_status+'</td><td>'+i.created_at+'</td></tr>';
+  }).join('');
+});
+</script></body></html>
